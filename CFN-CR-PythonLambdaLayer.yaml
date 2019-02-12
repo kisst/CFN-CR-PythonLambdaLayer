@@ -1,0 +1,173 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  This stack will create a Lambda Function which then backs CFN CR,
+  so new Lambdas can use Layers build based on a given requirements
+Metadata:
+  Author: KissT
+  Project: CFN-CR-PythonLambdaLayer
+  SourceCode: https://github.com/kisst/CFN-CR-PythonLambdaLayer
+
+Resources:
+  LambdaLambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: AllowLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+        - PolicyName: AllowLambda
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:AddLayerVersionPermission
+                  - lambda:GetLayerVersion
+                  - lambda:GetLayerVersionPolicy
+                  - lambda:ListLayerVersions
+                  - lambda:PublishLayerVersion
+                Resource: '*'
+
+  LambdaLayerBuilderFuntion:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Description: 'Build a lambda layer with given requirements'
+      Code:
+        ZipFile: |
+          """
+          Lambda function to create a Lambda layer from CFN
+          """
+          from __future__ import print_function
+          import subprocess
+          import sys
+          import os
+          import zipfile
+          import json
+          import importlib
+          try:
+              import cfnresponse
+              CFN_CALL = True
+          except ImportError:
+              CFN_CALL = False
+
+          PKG_DIR = "/tmp/packages/python/lib/python3.7/site-packages"
+          PKG_ROOT = "/tmp/packages"
+
+
+          def lambda_handler(event, context):
+              """
+              Main function to be called by Lambda
+              """
+              request_type = event['RequestType']
+              packages = event['ResourceProperties']['requirements']
+              name = event['ResourceProperties']['Name']
+              region = event['ResourceProperties']['Region']
+
+              if request_type == 'Create' or request_type == 'Update':
+                  pass
+              else:
+                  print("Nothing to do here")
+                  # Tell CFN that do are done doing nothing
+                  if CFN_CALL:
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, '')
+                  # Exit at this point
+                  sys.exit
+
+              install_with_pip(packages)
+              zipit(PKG_ROOT, "/tmp/layer")
+              layer_arn = publish_layer(name, region)
+
+              if CFN_CALL:
+                  data = { "Arn": layer_arn}
+                  physical_id = layer_arn
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, data, physical_id)
+
+
+          def zipit(src, dst):
+              """
+              Create a zip file from src into dst.zip
+              """
+              zipf = zipfile.ZipFile("%s.zip" % (dst), "w", zipfile.ZIP_DEFLATED)
+              abs_src = os.path.abspath(src)
+              for dirname, _, files in os.walk(src):
+                  for filename in files:
+                      absname = os.path.abspath(os.path.join(dirname, filename))
+                      arcname = absname[len(abs_src) + 1:]
+                      zipf.write(absname, arcname)
+              zipf.close()
+
+
+          def install_with_pip(packages):
+              """
+              Install pip package into /tmp folder
+              """
+              print(" -- Installing pip packages")
+              logfile = open("/tmp/pip-install.log", "wb")
+              for package in packages:
+                  print(" ---- Installing {}".format(package))
+                  subprocess.check_call([
+                      sys.executable, '-m', 'pip', 'install',
+                      '--upgrade', '-t', PKG_DIR, package], stdout=logfile)
+
+
+          def publish_layer(name, region):
+              """
+              Publish the built zip as a Lambda layer
+              """
+              logfile = open("/tmp/pip-install.log", "wb")
+              subprocess.check_call([
+                      sys.executable, '-m', 'pip', 'install',
+                      '--upgrade', '-t', '/tmp/upload', 'boto3'], stdout=logfile)
+
+              # my pip location
+              sys.path.insert(0, '/tmp/upload')
+              import botocore
+              importlib.reload(botocore)
+              import boto3
+
+
+              client = boto3.client('lambda', region_name=region)
+              response = client.publish_layer_version(
+                  LayerName=name,
+                  Description='Build with CFN Custom Resource',
+                  Content={'ZipFile': file_get_content('/tmp/layer.zip')},
+                  CompatibleRuntimes=['python3.7'])
+              return response['LayerVersionArn']
+
+
+          def file_get_content(filename):
+              """
+              Read the ZIP into python parsable var
+              """
+              with open(filename, 'rb') as filevar:
+                  return filevar.read()
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      Timeout: 900
+      Role: !GetAtt LambdaLambdaExecutionRole.Arn
+
+
+Outputs:
+  CRLambdaLayerARN:
+    Description: The ARN of the Lambda which can build the layers
+    Value: !GetAtt LambdaLayerBuilderFuntion.Arn
+    Export:
+      Name: !Sub "cfn:lambdalayer:${AWS::Region}:arn"

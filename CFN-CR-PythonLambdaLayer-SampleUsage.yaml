@@ -1,0 +1,75 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  This stack will demo the Layer Builder CFN CR, with two example Layer
+Metadata:
+  Author: KissT
+  Project: CFN-CR-PythonLambdaLayer
+  SourceCode: https://github.com/kisst/CFN-CR-PythonLambdaLayer
+
+Resources:
+  Boto3LambdaLayer:
+    Properties:
+      ServiceToken:
+        Fn::ImportValue: !Sub "cfn:lambdalayer:${AWS::Region}:arn"
+      Name: boto3-latest
+      Region: !Ref "AWS::Region"
+      requirements:
+        - boto3
+    Type: Custom::LayerBuilder
+
+  TropoLambdaLayer:
+    Properties:
+      ServiceToken:
+        Fn::ImportValue: !Sub "cfn:lambdalayer:${AWS::Region}:arn"
+      Name: cfn-account-policy
+      Region: !Ref "AWS::Region"
+      requirements:
+        - "troposphere>2.3.0"
+        - "awacs==0.7.2"
+    Type: Custom::LayerBuilder
+
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: AllowLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+
+  DemoLambdaFuntion:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Description: 'Show lib version from the layers'
+      Code:
+        ZipFile: |
+          import troposphere
+          import boto3
+
+          def lambda_handler(event, context):
+              print("Tropo version: {}".format(troposphere.__version__))
+              print("Boto3 version: {}".format(boto3.__version__))
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      Timeout: 60
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Layers:
+        - !GetAtt Boto3LambdaLayer.Arn
+        - !GetAtt TropoLambdaLayer.Arn
