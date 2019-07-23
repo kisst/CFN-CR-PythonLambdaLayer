@@ -29,6 +29,23 @@ Resources:
         - "awacs==0.7.2"
     Type: Custom::LayerBuilder
 
+  CustomLambdaLayer:
+    Properties:
+      ServiceToken:
+        Fn::ImportValue: !Sub "cfn:lambdalayer:${AWS::Region}:arn"
+      Name: inline-code-module
+      Region: !Ref "AWS::Region"
+      requirements:
+        - python-whois
+      filename: custom.py
+      filecontent:
+        Fn::Base64: !Sub |
+          import whois
+          def examine(domain):
+            result = whois.whois(domian)
+            return result
+    Type: Custom::LayerBuilder
+
   LambdaExecutionRole:
     Type: 'AWS::IAM::Role'
     Properties:
@@ -62,10 +79,13 @@ Resources:
         ZipFile: |
           import troposphere
           import boto3
+          import custom
 
           def lambda_handler(event, context):
               print("Tropo version: {}".format(troposphere.__version__))
               print("Boto3 version: {}".format(boto3.__version__))
+              print("WhoIs example.com:  {}".format(custom.examine('example.com')))
+              
       Handler: index.lambda_handler
       Runtime: python3.7
       Timeout: 60
@@ -73,3 +93,4 @@ Resources:
       Layers:
         - !GetAtt Boto3LambdaLayer.Arn
         - !GetAtt TropoLambdaLayer.Arn
+        - !GetAtt CustomLambdaLayer.Arn
