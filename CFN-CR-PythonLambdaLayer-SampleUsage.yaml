@@ -37,7 +37,7 @@ Resources:
       Region: !Ref "AWS::Region"
       requirements:
         - python-whois
-      filename: custom.py
+      filename: module.py
       filecontent:
         Fn::Base64: !Sub |
           import whois
@@ -79,12 +79,12 @@ Resources:
         ZipFile: |
           import troposphere
           import boto3
-          import custom
+          from local.module import examine
 
           def lambda_handler(event, context):
               print("Tropo version: {}".format(troposphere.__version__))
               print("Boto3 version: {}".format(boto3.__version__))
-              print("WhoIs example.com:  {}".format(custom.examine('example.com')))
+              print("WhoIs example.com:  {}".format(examine('example.com')))
               
       Handler: index.lambda_handler
       Runtime: python3.7
