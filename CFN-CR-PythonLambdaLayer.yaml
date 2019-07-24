@@ -95,7 +95,7 @@ Resources:
                   sys.exit
 
               install_with_pip(packages)
-              dump_text_to_file(text, PKG_ROOT, filename)
+              dump_text_to_file(text, PKG_DIR, filename)
               zipit(PKG_ROOT, "/tmp/layer")
               layer_arn = publish_layer(name, region)
 
@@ -106,11 +106,14 @@ Resources:
 
           def dump_text_to_file(text, dirpath, filename):
               # dump variable's contents to a file under dirpath
-              abs_dirpath = os.path.abspath(dirpath)
+              abs_dirpath = os.path.abspath(f"{dirpath}/local")
               try:
                   os.makedirs(abs_dirpath)
               except FileExistsError:
                   pass
+              abs_initpath = os.path.abspath(os.path.join(abs_dirpath, '__init__.py'))
+              with open(abs_initpath, mode='a'):
+                os.utime(abs_initpath, None)
               abs_filepath = os.path.abspath(os.path.join(abs_dirpath, filename))
               with open(abs_filepath, mode='w', encoding='utf-8') as f:
                 f.write(base64.b64decode(text).decode('utf-8'))
