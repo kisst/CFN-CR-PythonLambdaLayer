@@ -1,6 +1,6 @@
 # CFN-CR-PythonLambdaLayer
 
-CloudFormation Custom Resrouce to build Lambda layers for python scripts based on the requirements.txt
+CloudFormation Custom Resrouce to build Lambda layers for python scripts based on the requirements.txt and/or custom raw python scripts
 
 
 ## Usage 101
