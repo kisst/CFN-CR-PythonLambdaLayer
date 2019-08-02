@@ -29,6 +29,42 @@ Resources:
         - "awacs==0.7.2"
     Type: Custom::LayerBuilder
 
+  InlineCodeLambdaLayer:
+    Properties:
+      ServiceToken:
+        Fn::ImportValue: !Sub "cfn:lambdalayer:${AWS::Region}:arn"
+      Name: inline-code-only
+      Region: !Ref "AWS::Region"
+      filename: eratosthenes.py
+      filecontent:
+        Fn::Base64: !Sub |
+          def sieve(n):
+            # https://wikipedia.org/wiki/Sieve_of_Eratosthenes
+            return sorted(
+              set(range(2,n+1)).difference(
+                set((p * f) \
+                for p in range(2,int(n**0.5) + 2) \
+                for f in range(2,(n//p)+1))
+              )
+            )
+    Type: Custom::LayerBuilder
+
+  InlineCodeWithPipPackageLambdaLayer:
+    Properties:
+      ServiceToken:
+        Fn::ImportValue: !Sub "cfn:lambdalayer:${AWS::Region}:arn"
+      Name: inline-code-and-requirements
+      Region: !Ref "AWS::Region"
+      requirements:
+        - python-whois
+      filename: module.py
+      filecontent:
+        Fn::Base64: !Sub |
+          from whois import whois
+          def examine(domain):
+            return whois(domain)
+    Type: Custom::LayerBuilder
+
   LambdaExecutionRole:
     Type: 'AWS::IAM::Role'
     Properties:
@@ -62,10 +98,16 @@ Resources:
         ZipFile: |
           import troposphere
           import boto3
+          from lambdalayer.module import examine
+          from lambdalayer.eratosthenes import sieve
 
           def lambda_handler(event, context):
               print("Tropo version: {}".format(troposphere.__version__))
               print("Boto3 version: {}".format(boto3.__version__))
+              print("Sieve of Eratosthenes from 10: {}".format(sieve(10)))
+              print("WhoIs example.com:  {}".format(examine('example.com')))
+              
+              
       Handler: index.lambda_handler
       Runtime: python3.7
       Timeout: 60
@@ -73,3 +115,5 @@ Resources:
       Layers:
         - !GetAtt Boto3LambdaLayer.Arn
         - !GetAtt TropoLambdaLayer.Arn
+        - !GetAtt InlineCodeWithPipPackageLambdaLayer.Arn
+        - !GetAtt InlineCodeLambdaLayer.Arn
