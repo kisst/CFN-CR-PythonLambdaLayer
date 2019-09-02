@@ -1,13 +1,22 @@
 ---
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  This stack will demo the Layer Builder CFN CR, with two example Layer
+  This stack will demo the Layer Builder CFN CR, with few example Layer
+  Also used for testing...
 Metadata:
   Author: KissT
   Project: CFN-CR-PythonLambdaLayer
   SourceCode: https://github.com/kisst/CFN-CR-PythonLambdaLayer
 
 Resources:
+  EmptyLambdaLayer:
+    Properties:
+      ServiceToken:
+        Fn::ImportValue: !Sub "cfn:lambdalayer:${AWS::Region}:arn"
+      Name: test-gracefull-exit
+      Region: !Ref "AWS::Region"
+    Type: Custom::LayerBuilder
+
   Boto3LambdaLayer:
     Properties:
       ServiceToken:
