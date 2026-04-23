@@ -1,13 +1,21 @@
 ---
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  This stack will create a Lambda Function which then backs CFN CR,
-  so new Lambdas can use Layers build based on a given requirements,
-  or raw python to support extra functions
+  Publishes two builder Lambdas (x86_64 and arm64) that back a CFN Custom
+  Resource. Consumers import the ServiceToken matching the architecture of the
+  layer they want built: cfn:lambdalayer-x86-64:<region>:arn or
+  cfn:lambdalayer-arm64:<region>:arn.
 Metadata:
   Author: KissT
   Project: CFN-CR-PythonLambdaLayer
   SourceCode: https://github.com/kisst/CFN-CR-PythonLambdaLayer
+
+Parameters:
+  LogLevel:
+    Type: String
+    Description: Python logging level for the builder Lambdas. Update the stack to flip verbosity without code changes.
+    Default: INFO
+    AllowedValues: [CRITICAL, ERROR, WARNING, INFO, DEBUG, NOTSET]
 
 Resources:
   LambdaLambdaExecutionRole:
@@ -33,93 +41,123 @@ Resources:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: 'arn:aws:logs:*:*:*'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/cfn-cr-python-lambda-layer-x86_64'
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/cfn-cr-python-lambda-layer-x86_64:*'
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/cfn-cr-python-lambda-layer-arm64'
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/cfn-cr-python-lambda-layer-arm64:*'
         - PolicyName: AllowLambda
           PolicyDocument:
             Version: 2012-10-17
             Statement:
               - Effect: Allow
                 Action:
-                  - lambda:AddLayerVersionPermission
+                  - lambda:PublishLayerVersion
+                Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:layer:*'
+              - Effect: Allow
+                Action:
                   - lambda:GetLayerVersion
                   - lambda:GetLayerVersionPolicy
                   - lambda:ListLayerVersions
-                  - lambda:PublishLayerVersion
-                Resource: '*'
+                Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:layer:*:*'
 
-  LambdaLayerBuilderFuntion:
+  LayerBuilderX8664Function:
     Type: 'AWS::Lambda::Function'
     Properties:
-      Description: 'Build a lambda layer with given requirements'
+      FunctionName: cfn-cr-python-lambda-layer-x86_64
+      Description: 'Build a lambda layer with given requirements (x86_64)'
       Code:
         ZipFile: |
-          from __future__ import print_function
+          import base64
+          import contextlib
+          import logging
+          import os
+          import platform
           import subprocess
           import sys
-          import os
           import zipfile
-          import importlib
-          import base64
+          import boto3
           try:
               import cfnresponse
               CFN_CALL = True
           except ImportError:
               CFN_CALL = False
 
-          PKG_DIR = "/tmp/packages/python/lib/python3.7/site-packages"
+          BUILDER_RUNTIME = f"python{sys.version_info.major}.{sys.version_info.minor}"
+          _ARCH_MAP = {"x86_64": "x86_64", "aarch64": "arm64"}
+          BUILDER_ARCHITECTURE = _ARCH_MAP.get(platform.machine(), platform.machine())
+
           PKG_ROOT = "/tmp/packages"
+          PKG_DIR = f"{PKG_ROOT}/python/lib/{BUILDER_RUNTIME}/site-packages"
+
+          _LEVEL_NAME = os.environ.get("LOG_LEVEL", "INFO").upper()
+          logger = logging.getLogger()
+          logger.setLevel(logging.getLevelNamesMapping().get(_LEVEL_NAME, logging.INFO))
 
           def lambda_handler(event, context):
-              request_type = event['RequestType']
-              resource_properties = event['ResourceProperties']
-
-              name = resource_properties['Name']
-              region = resource_properties['Region']
-
-              if request_type in ('Create', 'Update'):
-                  pass
-              else:
-                  exit_gracefully("Nothing to do here", event, context)
-
-              job_to_do = False
               try:
-                  install_with_pip(resource_properties['requirements'])
-                  job_to_do = True
-              except KeyError:
-                  pass
+                  request_type = event['RequestType']
+                  resource_properties = event['ResourceProperties']
 
-              try:
-                  dump_text_to_file(
-                      resource_properties['filename'],
-                      resource_properties['filecontent'],
-                      PKG_DIR
-                  )
-                  job_to_do = True
-              except KeyError:
-                  pass
+                  name = resource_properties['Name']
+                  region = context.invoked_function_arn.split(':')[3]
 
-              if job_to_do:
-                  zipit(PKG_ROOT, "/tmp/layer")
-                  layer_arn = publish_layer(name, region)
+                  if request_type not in ('Create', 'Update'):
+                      exit_gracefully("Nothing to do here", event, context)
+
+                  job_to_do = False
+                  try:
+                      install_with_pip(resource_properties['requirements'])
+                      job_to_do = True
+                  except KeyError:
+                      pass
+
+                  try:
+                      dump_text_to_file(
+                          resource_properties['filename'],
+                          resource_properties['filecontent'],
+                          PKG_DIR
+                      )
+                      job_to_do = True
+                  except KeyError:
+                      pass
+
+                  if job_to_do:
+                      zipit(PKG_ROOT, "/tmp/layer")
+                      compatible_runtimes = resource_properties.get(
+                          'CompatibleRuntimes', [BUILDER_RUNTIME]
+                      )
+                      compatible_architectures = resource_properties.get(
+                          'CompatibleArchitectures', [BUILDER_ARCHITECTURE]
+                      )
+                      layer_arn = publish_layer(
+                          name, region, compatible_runtimes, compatible_architectures
+                      )
+                      if CFN_CALL:
+                          data = {"Arn": layer_arn}
+                          cfnresponse.send(event, context, cfnresponse.SUCCESS, data, layer_arn)
+                  else:
+                      exit_gracefully('Exit! No requirements or filename/filecontent', event, context)
+              except Exception as err:
+                  logger.exception("Unhandled error")
                   if CFN_CALL:
-                      data = {"Arn": layer_arn}
-                      physical_id = layer_arn
-                      cfnresponse.send(event, context, cfnresponse.SUCCESS, data, physical_id)
-              else:
-                  exit_gracefully('Exit! No requirements or filename/filecontent', event, context)
+                      physical_id = event.get('PhysicalResourceId') or context.log_stream_name
+                      cfnresponse.send(
+                          event, context, cfnresponse.FAILED, {}, physical_id, reason=str(err)
+                      )
+                  raise
 
           def exit_gracefully(message, event, context):
-              print(message)
+              logger.info(message)
               if CFN_CALL:
-                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, '')
-              sys.exit # pylint: disable=W0104
+                  physical_id = event.get('PhysicalResourceId') or context.log_stream_name
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, physical_id)
+              sys.exit(0)
 
           def dump_text_to_file(filename, text, dirpath):
               abs_dirpath = os.path.abspath(f"{dirpath}/lambdalayer")
-              try:
+              with contextlib.suppress(FileExistsError):
                   os.makedirs(abs_dirpath)
-              except FileExistsError:
-                  pass
               abs_initpath = os.path.abspath(os.path.join(abs_dirpath, '__init__.py'))
               with open(abs_initpath, mode='a'):
                   os.utime(abs_initpath, None)
@@ -128,55 +166,208 @@ Resources:
                   file_var.write(base64.b64decode(text).decode('utf-8'))
 
           def zipit(src, dst):
-              zipf = zipfile.ZipFile("%s.zip" % (dst), "w", zipfile.ZIP_DEFLATED)
-              abs_src = os.path.abspath(src)
-              for dirname, _, files in os.walk(src):
-                  for filename in files:
-                      absname = os.path.abspath(os.path.join(dirname, filename))
-                      arcname = absname[len(abs_src) + 1:]
-                      zipf.write(absname, arcname)
-              zipf.close()
+              with zipfile.ZipFile(f"{dst}.zip", "w", zipfile.ZIP_DEFLATED) as zipf:
+                  abs_src = os.path.abspath(src)
+                  for dirname, _, files in os.walk(src):
+                      for filename in files:
+                          absname = os.path.abspath(os.path.join(dirname, filename))
+                          arcname = absname[len(abs_src) + 1:]
+                          zipf.write(absname, arcname)
 
           def install_with_pip(packages):
-              print(" -- Installing pip packages")
-              logfile = open("/tmp/pip-install.log", "wb")
-              for package in packages:
-                  print(" ---- Installing {}".format(package))
-                  subprocess.check_call([
-                      sys.executable, '-m', 'pip', 'install',
-                      '--upgrade', '-t', PKG_DIR, package], stdout=logfile)
+              logger.info("Installing pip packages")
+              with open("/tmp/pip-install.log", "wb") as logfile:
+                  for package in packages:
+                      logger.info("Installing %s", package)
+                      subprocess.check_call(
+                          [sys.executable, '-m', 'pip', 'install', '--upgrade', '-t', PKG_DIR, package],
+                          stdout=logfile,
+                      )
 
-          def publish_layer(name, region):
-              logfile = open("/tmp/pip-install.log", "wb")
-              subprocess.check_call([
-                  sys.executable, '-m', 'pip', 'install',
-                  '--upgrade', '-t', '/tmp/upload', 'boto3'], stdout=logfile)
-
-              sys.path.insert(0, '/tmp/upload')
-              import botocore
-              importlib.reload(botocore)
-              import boto3
-
+          def publish_layer(name, region, compatible_runtimes, compatible_architectures):
               client = boto3.client('lambda', region_name=region)
               response = client.publish_layer_version(
                   LayerName=name,
                   Description='Build with CFN Custom Resource',
                   Content={'ZipFile': file_get_content('/tmp/layer.zip')},
-                  CompatibleRuntimes=['python3.7'])
+                  CompatibleRuntimes=compatible_runtimes,
+                  CompatibleArchitectures=compatible_architectures,
+              )
               return response['LayerVersionArn']
 
           def file_get_content(filename):
               with open(filename, 'rb') as filevar:
                   return filevar.read()
       Handler: index.lambda_handler
-      Runtime: python3.7
+      Runtime: python3.14
+      Architectures:
+        - x86_64
       Timeout: 900
       Role: !GetAtt LambdaLambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          LOG_LEVEL: !Ref LogLevel
+
+  LayerBuilderArm64Function:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: cfn-cr-python-lambda-layer-arm64
+      Description: 'Build a lambda layer with given requirements (arm64)'
+      Code:
+        # NOTE: CloudFormation rejects YAML aliases at deploy time, so this
+        # block is duplicated verbatim from LayerBuilderX8664Function above.
+        # scripts/check_embedded_code.py verifies both stay in sync with
+        # lambda_function.py — do not edit one without the other.
+        ZipFile: |
+          import base64
+          import contextlib
+          import logging
+          import os
+          import platform
+          import subprocess
+          import sys
+          import zipfile
+          import boto3
+          try:
+              import cfnresponse
+              CFN_CALL = True
+          except ImportError:
+              CFN_CALL = False
+
+          BUILDER_RUNTIME = f"python{sys.version_info.major}.{sys.version_info.minor}"
+          _ARCH_MAP = {"x86_64": "x86_64", "aarch64": "arm64"}
+          BUILDER_ARCHITECTURE = _ARCH_MAP.get(platform.machine(), platform.machine())
+
+          PKG_ROOT = "/tmp/packages"
+          PKG_DIR = f"{PKG_ROOT}/python/lib/{BUILDER_RUNTIME}/site-packages"
+
+          _LEVEL_NAME = os.environ.get("LOG_LEVEL", "INFO").upper()
+          logger = logging.getLogger()
+          logger.setLevel(logging.getLevelNamesMapping().get(_LEVEL_NAME, logging.INFO))
+
+          def lambda_handler(event, context):
+              try:
+                  request_type = event['RequestType']
+                  resource_properties = event['ResourceProperties']
+
+                  name = resource_properties['Name']
+                  region = context.invoked_function_arn.split(':')[3]
+
+                  if request_type not in ('Create', 'Update'):
+                      exit_gracefully("Nothing to do here", event, context)
+
+                  job_to_do = False
+                  try:
+                      install_with_pip(resource_properties['requirements'])
+                      job_to_do = True
+                  except KeyError:
+                      pass
+
+                  try:
+                      dump_text_to_file(
+                          resource_properties['filename'],
+                          resource_properties['filecontent'],
+                          PKG_DIR
+                      )
+                      job_to_do = True
+                  except KeyError:
+                      pass
+
+                  if job_to_do:
+                      zipit(PKG_ROOT, "/tmp/layer")
+                      compatible_runtimes = resource_properties.get(
+                          'CompatibleRuntimes', [BUILDER_RUNTIME]
+                      )
+                      compatible_architectures = resource_properties.get(
+                          'CompatibleArchitectures', [BUILDER_ARCHITECTURE]
+                      )
+                      layer_arn = publish_layer(
+                          name, region, compatible_runtimes, compatible_architectures
+                      )
+                      if CFN_CALL:
+                          data = {"Arn": layer_arn}
+                          cfnresponse.send(event, context, cfnresponse.SUCCESS, data, layer_arn)
+                  else:
+                      exit_gracefully('Exit! No requirements or filename/filecontent', event, context)
+              except Exception as err:
+                  logger.exception("Unhandled error")
+                  if CFN_CALL:
+                      physical_id = event.get('PhysicalResourceId') or context.log_stream_name
+                      cfnresponse.send(
+                          event, context, cfnresponse.FAILED, {}, physical_id, reason=str(err)
+                      )
+                  raise
+
+          def exit_gracefully(message, event, context):
+              logger.info(message)
+              if CFN_CALL:
+                  physical_id = event.get('PhysicalResourceId') or context.log_stream_name
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, physical_id)
+              sys.exit(0)
+
+          def dump_text_to_file(filename, text, dirpath):
+              abs_dirpath = os.path.abspath(f"{dirpath}/lambdalayer")
+              with contextlib.suppress(FileExistsError):
+                  os.makedirs(abs_dirpath)
+              abs_initpath = os.path.abspath(os.path.join(abs_dirpath, '__init__.py'))
+              with open(abs_initpath, mode='a'):
+                  os.utime(abs_initpath, None)
+              abs_filepath = os.path.abspath(os.path.join(abs_dirpath, filename))
+              with open(abs_filepath, mode='w', encoding='utf-8') as file_var:
+                  file_var.write(base64.b64decode(text).decode('utf-8'))
+
+          def zipit(src, dst):
+              with zipfile.ZipFile(f"{dst}.zip", "w", zipfile.ZIP_DEFLATED) as zipf:
+                  abs_src = os.path.abspath(src)
+                  for dirname, _, files in os.walk(src):
+                      for filename in files:
+                          absname = os.path.abspath(os.path.join(dirname, filename))
+                          arcname = absname[len(abs_src) + 1:]
+                          zipf.write(absname, arcname)
+
+          def install_with_pip(packages):
+              logger.info("Installing pip packages")
+              with open("/tmp/pip-install.log", "wb") as logfile:
+                  for package in packages:
+                      logger.info("Installing %s", package)
+                      subprocess.check_call(
+                          [sys.executable, '-m', 'pip', 'install', '--upgrade', '-t', PKG_DIR, package],
+                          stdout=logfile,
+                      )
+
+          def publish_layer(name, region, compatible_runtimes, compatible_architectures):
+              client = boto3.client('lambda', region_name=region)
+              response = client.publish_layer_version(
+                  LayerName=name,
+                  Description='Build with CFN Custom Resource',
+                  Content={'ZipFile': file_get_content('/tmp/layer.zip')},
+                  CompatibleRuntimes=compatible_runtimes,
+                  CompatibleArchitectures=compatible_architectures,
+              )
+              return response['LayerVersionArn']
+
+          def file_get_content(filename):
+              with open(filename, 'rb') as filevar:
+                  return filevar.read()
+      Handler: index.lambda_handler
+      Runtime: python3.14
+      Architectures:
+        - arm64
+      Timeout: 900
+      Role: !GetAtt LambdaLambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          LOG_LEVEL: !Ref LogLevel
 
 
 Outputs:
-  CRLambdaLayerARN:
-    Description: The ARN of the Lambda which can build the layers
-    Value: !GetAtt LambdaLayerBuilderFuntion.Arn
+  CRLambdaLayerX8664ARN:
+    Description: ARN of the x86_64 builder Lambda
+    Value: !GetAtt LayerBuilderX8664Function.Arn
     Export:
-      Name: !Sub "cfn:lambdalayer:${AWS::Region}:arn"
+      Name: !Sub "cfn:lambdalayer-x86-64:${AWS::Region}:arn"
+  CRLambdaLayerArm64ARN:
+    Description: ARN of the arm64 builder Lambda
+    Value: !GetAtt LayerBuilderArm64Function.Arn
+    Export:
+      Name: !Sub "cfn:lambdalayer-arm64:${AWS::Region}:arn"

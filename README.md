@@ -1,31 +1,53 @@
 # CFN-CR-PythonLambdaLayer
 
-CloudFormation Custom Resrouce to build Lambda layers for python scripts based 
-on the requirements.txt and/or custom raw python scripts
+CloudFormation Custom Resource that builds Lambda layers from pip
+requirements and/or inline Python source at stack deploy time — no S3
+artefacts to upload first.
 
-note: the lambda function with comments, and doc strings is also in the repo
-under the name of `lambda_function.py` but into the CFN it's lifted in without
-doc strings, due to size limit.
+## Quickstart
 
+Deploy the builder stack once per region:
 
-## Usage 101
+```
+aws cloudformation deploy \
+  --template-file CFN-CR-PythonLambdaLayer.yaml \
+  --stack-name cfn-cr-python-lambda-layer \
+  --capabilities CAPABILITY_IAM
+```
 
- - Step 1
+Then declare a layer in any downstream stack, importing the ServiceToken for
+the target architecture (`x86_64` or `arm64`):
 
- Go to your AWS Console, and open CloudFormation
+```yaml
+MyDepsLayer:
+  Type: Custom::LayerBuilder
+  Properties:
+    ServiceToken: !ImportValue "cfn:lambdalayer-x86-64:us-east-1:arn"
+    Name: my-app-deps
+    requirements: [requests, pydantic]
+```
 
- - Step 2
+See `CFN-CR-PythonLambdaLayer-SampleUsage.yaml` for more examples.
 
- Deploy the `CFN-CR-PythonLambdaLayer.yaml` template
+## Custom resource properties
 
- - Step 3
+| Property | Required | Description |
+|----------|----------|-------------|
+| `ServiceToken` | yes | Builder Lambda ARN, via `Fn::ImportValue`. |
+| `Name` | yes | Layer name. |
+| `requirements` | one of these two | List of pip requirement strings. |
+| `filename` + `filecontent` | one of these two | Inline Python module; `filecontent` is base64 (use `Fn::Base64`). |
+| `CompatibleRuntimes` | no | Defaults to the builder's own runtime. |
+| `CompatibleArchitectures` | no | Defaults to the builder's own arch. Override only for pure-Python layers. |
 
- As per in the examples in the CFN-CR-PythonLambdaLayer-SampleUsage.yaml
- create your own layer as you need
+Calling the `x86_64` vs `arm64` builder is how you pick the target
+architecture — C-extension wheels are installed on the builder's host arch,
+so they must match the consumer function's arch.
 
- - Step 4
+## Limitations
 
- Enjoy, and if you find issues, send it [here](https://github.com/kisst/CFN-CR-PythonLambdaLayer/issues)
+Layers cap at 50 MB zipped / 250 MB unzipped; builder has 512 MB `/tmp` and a
+15-min timeout. Delete is a no-op — clean up layer versions manually.
 
 ---
- Contributions are welcome.
+Contributions welcome: <https://github.com/kisst/CFN-CR-PythonLambdaLayer/issues>

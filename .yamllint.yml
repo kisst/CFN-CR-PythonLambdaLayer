@@ -1,0 +1,18 @@
+extends: default
+
+rules:
+  line-length:
+    max: 160
+    level: warning
+  # CFN templates and their inline scripts break default indentation rules;
+  # relax to avoid false positives on block scalars.
+  indentation:
+    spaces: 2
+    indent-sequences: consistent
+  # The inline ZipFile uses trailing whitespace we don't control.
+  trailing-spaces: disable
+  comments:
+    min-spaces-from-content: 1
+  document-start: disable
+  truthy:
+    check-keys: false

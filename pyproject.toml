@@ -1,0 +1,16 @@
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+
+[tool.ruff.lint]
+# Pyflakes, pycodestyle, isort, bugbear, simplify, comprehensions.
+select = ["E", "F", "W", "I", "B", "C4", "SIM", "UP"]
+# Lambda environment doesn't have cfnresponse at test-import time — the test
+# suite installs a stub. That's fine; no config needed here for it.
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

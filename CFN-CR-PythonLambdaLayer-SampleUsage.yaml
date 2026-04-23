@@ -12,41 +12,47 @@ Resources:
   EmptyLambdaLayer:
     Properties:
       ServiceToken:
-        Fn::ImportValue: !Sub "cfn:lambdalayer:${AWS::Region}:arn"
+        Fn::ImportValue: !Sub "cfn:lambdalayer-x86-64:${AWS::Region}:arn"
       Name: test-gracefull-exit
-      Region: !Ref "AWS::Region"
     Type: Custom::LayerBuilder
 
   Boto3LambdaLayer:
     Properties:
       ServiceToken:
-        Fn::ImportValue: !Sub "cfn:lambdalayer:${AWS::Region}:arn"
+        Fn::ImportValue: !Sub "cfn:lambdalayer-x86-64:${AWS::Region}:arn"
       Name: boto3-latest
-      Region: !Ref "AWS::Region"
       requirements:
         - boto3
     Type: Custom::LayerBuilder
 
-  TropoLambdaLayer:
+  RequestsLambdaLayer:
     Properties:
       ServiceToken:
-        Fn::ImportValue: !Sub "cfn:lambdalayer:${AWS::Region}:arn"
-      Name: cfn-account-policy
-      Region: !Ref "AWS::Region"
+        Fn::ImportValue: !Sub "cfn:lambdalayer-x86-64:${AWS::Region}:arn"
+      Name: requests-latest
       requirements:
-        - "troposphere>2.3.0"
-        - "awacs==0.7.2"
+        - requests
+    Type: Custom::LayerBuilder
+
+  # Pydantic has a compiled pydantic-core dependency; the builder's arch must
+  # match the consumer function's arch. x86_64 builder → x86_64 consumer.
+  PydanticLambdaLayer:
+    Properties:
+      ServiceToken:
+        Fn::ImportValue: !Sub "cfn:lambdalayer-x86-64:${AWS::Region}:arn"
+      Name: pydantic-latest
+      requirements:
+        - pydantic
     Type: Custom::LayerBuilder
 
   InlineCodeLambdaLayer:
     Properties:
       ServiceToken:
-        Fn::ImportValue: !Sub "cfn:lambdalayer:${AWS::Region}:arn"
+        Fn::ImportValue: !Sub "cfn:lambdalayer-x86-64:${AWS::Region}:arn"
       Name: inline-code-only
-      Region: !Ref "AWS::Region"
       filename: eratosthenes.py
       filecontent:
-        Fn::Base64: !Sub |
+        Fn::Base64: |
           def sieve(n):
             # https://wikipedia.org/wiki/Sieve_of_Eratosthenes
             return sorted(
@@ -61,17 +67,27 @@ Resources:
   InlineCodeWithPipPackageLambdaLayer:
     Properties:
       ServiceToken:
-        Fn::ImportValue: !Sub "cfn:lambdalayer:${AWS::Region}:arn"
+        Fn::ImportValue: !Sub "cfn:lambdalayer-x86-64:${AWS::Region}:arn"
       Name: inline-code-and-requirements
-      Region: !Ref "AWS::Region"
       requirements:
         - python-whois
       filename: module.py
       filecontent:
-        Fn::Base64: !Sub |
+        Fn::Base64: |
           from whois import whois
           def examine(domain):
             return whois(domain)
+    Type: Custom::LayerBuilder
+
+  # Same requirements, different arch: call the arm64 builder. C extensions
+  # get built natively for arm64 so Graviton consumer functions work.
+  Arm64BotoLambdaLayer:
+    Properties:
+      ServiceToken:
+        Fn::ImportValue: !Sub "cfn:lambdalayer-arm64:${AWS::Region}:arn"
+      Name: boto3-latest-arm64
+      requirements:
+        - boto3
     Type: Custom::LayerBuilder
 
   LambdaExecutionRole:
@@ -105,24 +121,25 @@ Resources:
       Description: 'Show lib version from the layers'
       Code:
         ZipFile: |
-          import troposphere
           import boto3
+          import pydantic
+          import requests
           from lambdalayer.module import examine
           from lambdalayer.eratosthenes import sieve
 
           def lambda_handler(event, context):
-              print("Tropo version: {}".format(troposphere.__version__))
-              print("Boto3 version: {}".format(boto3.__version__))
-              print("Sieve of Eratosthenes from 10: {}".format(sieve(10)))
-              print("WhoIs example.com:  {}".format(examine('example.com')))
-              
-              
+              print(f"boto3 version:    {boto3.__version__}")
+              print(f"pydantic version: {pydantic.VERSION}")
+              print(f"requests version: {requests.__version__}")
+              print(f"Sieve of Eratosthenes from 10: {sieve(10)}")
+              print(f"WhoIs example.com: {examine('example.com')}")
       Handler: index.lambda_handler
-      Runtime: python3.7
+      Runtime: python3.14
       Timeout: 60
       Role: !GetAtt LambdaExecutionRole.Arn
       Layers:
         - !GetAtt Boto3LambdaLayer.Arn
-        - !GetAtt TropoLambdaLayer.Arn
+        - !GetAtt RequestsLambdaLayer.Arn
+        - !GetAtt PydanticLambdaLayer.Arn
         - !GetAtt InlineCodeWithPipPackageLambdaLayer.Arn
         - !GetAtt InlineCodeLambdaLayer.Arn
